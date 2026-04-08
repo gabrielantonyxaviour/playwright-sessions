@@ -23,6 +23,12 @@
     "claude",
     "ai"
   ],
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "dist/**/*.js.map",
+    "src/**/*.ts"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/index.ts",

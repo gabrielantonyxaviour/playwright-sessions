@@ -38,6 +38,10 @@ export interface Session {
   >;
   /** Whether tracing is currently active */
   tracingActive: boolean;
+  /** True if this session was created via session_clone */
+  isClone: boolean;
+  /** Name of the source session this was cloned from (if isClone) */
+  clonedFrom?: string;
 }
 
 export interface SessionInfo {
@@ -62,11 +66,14 @@ export interface SessionManagerOptions {
   idleTimeoutMs?: number;
   /** Directory for persistent session states. Default: ~/.playwright-sessions */
   stateDir?: string;
+  /** Max age in days before a saved session is archived on startup. 0 = disabled. Default: 30. */
+  archiveAfterDays?: number;
 }
 
 const DEFAULT_MAX_SESSIONS = 20;
 const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 const REAPER_INTERVAL_MS = 30 * 1000; // check every 30s
+const DEFAULT_ARCHIVE_AFTER_DAYS = 30;
 
 const DEFAULT_STATE_DIR = `${process.env.HOME}/.playwright-sessions`;
 
@@ -91,12 +98,35 @@ export class SessionManager {
       maxSessions: options.maxSessions ?? DEFAULT_MAX_SESSIONS,
       idleTimeoutMs: options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
       stateDir: options.stateDir ?? DEFAULT_STATE_DIR,
+      archiveAfterDays: options.archiveAfterDays ?? DEFAULT_ARCHIVE_AFTER_DAYS,
     };
 
     this.stateStore = new StateStore(this.options.stateDir);
 
     const browserTypes = { chromium, firefox, webkit };
     this.browserType = browserTypes[this.options.browserType];
+
+    // Archive stale saved sessions on startup (safety net against pollution).
+    // Uses stderr so it doesn't corrupt the stdio JSON-RPC stream.
+    if (this.options.archiveAfterDays > 0) {
+      try {
+        const archived = this.stateStore.archiveStale(
+          this.options.archiveAfterDays,
+        );
+        if (archived.length > 0) {
+          process.stderr.write(
+            `[playwright-sessions] Archived ${archived.length} stale session(s) ` +
+              `(older than ${this.options.archiveAfterDays} days) to ${this.options.stateDir}/.archived/: ` +
+              archived.join(", ") +
+              "\n",
+          );
+        }
+      } catch (err) {
+        process.stderr.write(
+          `[playwright-sessions] TTL archival failed: ${(err as Error).message}\n`,
+        );
+      }
+    }
 
     // Start the idle reaper if timeout is enabled
     if (this.options.idleTimeoutMs > 0) {
@@ -316,6 +346,7 @@ export class SessionManager {
       dead: false,
       routes: new Map(),
       tracingActive: false,
+      isClone: false,
       renamedFrom,
     };
 
@@ -378,6 +409,8 @@ export class SessionManager {
       dead: false,
       routes: new Map(),
       tracingActive: false,
+      isClone: true,
+      clonedFrom: source.name,
     };
 
     this.sessions.set(id, session);
@@ -394,17 +427,9 @@ export class SessionManager {
         await session.context.tracing.stop().catch(() => {});
         session.tracingActive = false;
       }
-      // Auto-save state before closing (only named sessions that visited a real page)
-      try {
-        const page = session.pages.find((p) => !p.isClosed());
-        const url = page?.url() || "";
-        if (session.name !== session.id && url && url !== "about:blank") {
-          const storageState = await session.context.storageState();
-          this.stateStore.save(session.name, storageState, url);
-        }
-      } catch {
-        /* best effort */
-      }
+      // NOTE: No auto-save. Sessions are only persisted via explicit session_save.
+      // Clones are throwaway by design — saving them on close (the pre-v0.2.0 behavior)
+      // caused the saved-session directory to fill with polluted test runs.
       await session.context.close().catch(() => {});
     }
 
@@ -530,9 +555,39 @@ export class SessionManager {
 
   /**
    * Save a session's state to disk for persistence across Claude Code restarts.
+   * Clones cannot be saved by default — they are throwaway by design.
+   * Pass `overwriteSource: true` to intentionally overwrite the session this was cloned from.
    */
-  async saveSession(sessionId?: string): Promise<string> {
+  async saveSession(
+    sessionId?: string,
+    overwriteSource = false,
+  ): Promise<string> {
     const session = this.getSession(sessionId);
+
+    // Guard: clones should not be saved as new named sessions.
+    // The whole point of cloning is throwaway auth reuse.
+    if (session.isClone) {
+      if (!overwriteSource) {
+        throw new Error(
+          `Session "${session.name}" is a clone of "${session.clonedFrom}". ` +
+            `Clones are throwaway by design — saving them pollutes the saved session store. ` +
+            `If you intend to update the source auth, pass overwriteSource: true ` +
+            `(this will save back to "${session.clonedFrom}", NOT create a new file).`,
+        );
+      }
+      // Overwrite mode: save back to the source, not a new file
+      const storageState = await session.context.storageState();
+      let lastUrl = "about:blank";
+      try {
+        const page = this.getActivePage(session);
+        lastUrl = page.url();
+      } catch {
+        /* no pages */
+      }
+      this.stateStore.save(session.clonedFrom!, storageState, lastUrl);
+      return session.clonedFrom!;
+    }
+
     const storageState = await session.context.storageState();
     let lastUrl = "about:blank";
     try {
@@ -553,17 +608,7 @@ export class SessionManager {
 
     for (const session of this.sessions.values()) {
       if (!session.dead) {
-        // Auto-save named sessions before shutdown
-        try {
-          const page = session.pages.find((p) => !p.isClosed());
-          const url = page?.url() || "";
-          if (session.name !== session.id && url && url !== "about:blank") {
-            const storageState = await session.context.storageState();
-            this.stateStore.save(session.name, storageState, url);
-          }
-        } catch {
-          /* best effort */
-        }
+        // NOTE: No auto-save on shutdown. Only explicit session_save persists state.
         await session.context.close().catch(() => {});
       }
     }

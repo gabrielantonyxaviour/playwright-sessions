@@ -1,3 +1,4 @@
+import { readFileSync } from "fs";
 import {
   setupPageListeners,
   withSession,
@@ -5,6 +6,7 @@ import {
   networkLogs,
 } from "./shared.js";
 import type { HandlerFn } from "./shared.js";
+import { probeServices } from "../session-probe.js";
 
 export const sessionHandlers = new Map<string, HandlerFn>([
   [
@@ -59,9 +61,6 @@ export const sessionHandlers = new Map<string, HandlerFn>([
     "session_list",
     async (_args, manager) => {
       const sessions = await manager.listSessions();
-      if (sessions.length === 0) {
-        return "No active sessions. Use session_create to start one.";
-      }
       return JSON.stringify(sessions, null, 2);
     },
   ],
@@ -113,24 +112,79 @@ export const sessionHandlers = new Map<string, HandlerFn>([
     "session_save",
     async (args, manager) => {
       const sid = args.sessionId as string | undefined;
-      const savedName = await manager.saveSession(sid);
+      const overwriteSource = args.overwriteSource as boolean | undefined;
+      const savedName = await manager.saveSession(sid, overwriteSource);
       return `Session "${savedName}" state saved to disk. Restore it in a future session with: session_create({ name: "${savedName}", restore: true })`;
     },
   ],
   [
     "session_list_saved",
-    async (_args, manager) => {
+    async (args, manager) => {
       manager.stateStore.cleanStaleLocks();
       const saved = manager.stateStore.listSaved();
       if (saved.length === 0) {
-        return "No saved session states. Use session_save to persist a session's cookies to disk.";
+        return JSON.stringify([]);
       }
+
+      // Optional: run HTTP probes to verify live server-side auth
+      const probe = args.probe as boolean | undefined;
+      const probeResultsBySession = new Map<
+        string,
+        Map<string, { alive: boolean; reason: string }>
+      >();
+      if (probe) {
+        await Promise.all(
+          saved.map(async (s) => {
+            if (!s.auth || s.auth.length === 0) return;
+            try {
+              const data = JSON.parse(readFileSync(s.filePath, "utf-8"));
+              const services = s.auth.map((a) => a.service);
+              const results = await probeServices(data.storageState, services);
+              probeResultsBySession.set(
+                s.name,
+                new Map(results.map((r) => [r.service, r])),
+              );
+            } catch {
+              /* skip unreadable */
+            }
+          }),
+        );
+      }
+
       const formatted = saved.map((s) => {
+        const expiryMap = new Map((s.expiry ?? []).map((e) => [e.service, e]));
+        const probeMap = probeResultsBySession.get(s.name);
         const authSummary = s.auth?.length
           ? s.auth.map((a) => {
               const id = a.identity ? ` (${a.identity})` : "";
               const tag = a.manual ? " [manual]" : "";
-              return `${a.service}${id}${tag}`;
+              const exp = expiryMap.get(a.service);
+              let expTag = "";
+              if (exp) {
+                if (exp.status === "valid") {
+                  expTag = ` [valid, ${exp.daysUntilExpiry}d left]`;
+                } else if (exp.status === "expiring-soon") {
+                  expTag = ` [expiring in ${exp.daysUntilExpiry}d]`;
+                } else if (exp.status === "expired") {
+                  expTag = ` [EXPIRED]`;
+                } else if (exp.status === "session-only") {
+                  expTag = ` [session cookie]`;
+                }
+              }
+              let probeTag = "";
+              if (probeMap) {
+                const r = probeMap.get(a.service);
+                if (r) {
+                  if (r.reason === "no-probe") {
+                    probeTag = " [no probe]";
+                  } else if (r.alive) {
+                    probeTag = " [LIVE]";
+                  } else {
+                    probeTag = ` [DEAD ${r.reason}]`;
+                  }
+                }
+              }
+              return `${a.service}${id}${tag}${expTag}${probeTag}`;
             })
           : [];
         const lockLabel = s.lock.locked

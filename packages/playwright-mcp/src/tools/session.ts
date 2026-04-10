@@ -38,7 +38,7 @@ export function sessionToolDefs() {
     {
       name: "session_clone",
       description:
-        "Clone a session's authentication state (cookies, localStorage) into a new session. The new session starts with the same login but a fresh page. Perfect for testing the same app as a different user without re-logging in.",
+        "Clone a session's authentication state (cookies, localStorage) into a new throwaway session. Use this for stateless testing — clone a saved auth session, do your work, close the clone. IMPORTANT: Clones are throwaway by design. session_save will refuse to save a clone unless overwriteSource:true is passed (which overwrites the source). If you want to establish a NEW persistent auth, use session_create + manual login + session_save instead.",
       inputSchema: {
         type: "object",
         properties: {
@@ -48,7 +48,8 @@ export function sessionToolDefs() {
           },
           name: {
             type: "string",
-            description: "Name for the new cloned session.",
+            description:
+              "Name for the new cloned session. This name is for in-memory use only — the clone will NOT be saved to disk on close.",
           },
         },
         required: ["sourceSessionId"],
@@ -102,7 +103,7 @@ export function sessionToolDefs() {
     {
       name: "session_save",
       description:
-        "Save a session's cookies and localStorage to disk so they persist across Claude Code restarts. Next time, use session_create with restore=true and the same name to restore the saved auth state without re-logging in.",
+        "Persist a session's cookies and localStorage to disk. Use this ONLY after establishing a NEW auth (first-time login setup): session_create → user/you logs in → session_save. Clones cannot be saved as new files — this tool throws on a clone unless overwriteSource:true is passed (which overwrites the source auth, not a new name). Sessions are NOT auto-saved on close — only explicit session_save writes to disk.",
       inputSchema: {
         type: "object",
         properties: {
@@ -111,14 +112,28 @@ export function sessionToolDefs() {
             description:
               "Session ID or name. If omitted, uses the default session. Use session_list to see active sessions.",
           },
+          overwriteSource: {
+            type: "boolean",
+            description:
+              "If the session is a clone, pass true to save back to the cloned-from source (e.g. to refresh expired auth on the source). Default false. Ignored if the session is not a clone.",
+          },
         },
       },
     },
     {
       name: "session_list_saved",
       description:
-        "List all previously saved session states on disk. Shows name, last URL, authenticated services (auto-detected from cookies), user identity, and lock status (whether another process is using it). Use this to find which session has the auth you need before restoring.",
-      inputSchema: { type: "object", properties: {} },
+        "List all saved session states on disk. Shows name, last URL, authenticated services, identity, cookie expiry status (valid/expiring-soon/expired/session-only — derived from cookie metadata with NO network calls), and lock status. Optionally runs HTTP probes to verify live server-side auth (only supported for a small set of services; most show 'no probe').",
+      inputSchema: {
+        type: "object",
+        properties: {
+          probe: {
+            type: "boolean",
+            description:
+              "If true, make lightweight HTTP requests to verify each service's auth is actually alive server-side. Slow (adds ~1-2s per session). Only reliable for services whose web auth uses session cookies — most modern apps use JWTs in localStorage and will show [no probe]. Defaults to false (cookie-metadata-only check).",
+          },
+        },
+      },
     },
     {
       name: "session_tag",

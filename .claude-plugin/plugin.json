@@ -1,0 +1,12 @@
+{
+  "name": "playwright-sessions",
+  "description": "Persistent browser sessions for Claude Code — save/restore auth, manage multiple isolated contexts, detect expired logins, and safely clone sessions for testing. Built on Playwright MCP.",
+  "author": {
+    "name": "Gabriel Antony Xaviour",
+    "email": "gabrielantony56@gmail.com",
+    "url": "https://github.com/gabrielantonyxaviour"
+  },
+  "repository": "https://github.com/gabrielantonyxaviour/playwright-sessions",
+  "license": "Apache-2.0",
+  "version": "0.2.0"
+}

@@ -33,7 +33,7 @@ interface StorageStateShape {
 
 // ─── Service Domain Map ────────────────────────────────────────────
 // [domainSuffix, serviceName]
-const SERVICE_DOMAINS: [string, string][] = [
+export const SERVICE_DOMAINS: [string, string][] = [
   // Dev platforms
   ["github.com", "GitHub"],
   ["githubusercontent.com", "GitHub"],

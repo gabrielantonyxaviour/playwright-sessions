@@ -1,6 +1,6 @@
 {
   "name": "playwright-sessions",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Playwright MCP with persistent named sessions — save/restore browser auth, clone sessions, manage multiple isolated contexts. Fork of microsoft/playwright-mcp.",
   "type": "module",
   "repository": {
@@ -18,10 +18,17 @@
   "keywords": [
     "playwright",
     "mcp",
+    "mcp-server",
+    "model-context-protocol",
     "sessions",
     "browser-automation",
     "claude",
-    "ai"
+    "claude-code",
+    "claude-code-plugin",
+    "ai",
+    "llm",
+    "testing",
+    "e2e"
   ],
   "files": [
     "dist/**/*.js",

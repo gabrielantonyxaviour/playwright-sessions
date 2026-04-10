@@ -5,6 +5,7 @@ import {
   existsSync,
   readdirSync,
   unlinkSync,
+  renameSync,
 } from "fs";
 import { join } from "path";
 import {
@@ -12,6 +13,7 @@ import {
   mergeAuth,
   type DetectedAuth,
 } from "./service-detector.js";
+import { checkExpiry, type ServiceExpiry } from "./session-expiry.js";
 
 export interface SavedState {
   name: string;
@@ -43,6 +45,8 @@ export interface SavedStateInfo {
   savedBy: string;
   filePath: string;
   auth?: DetectedAuth[];
+  /** Per-service expiry status derived from cookie metadata (no network) */
+  expiry?: ServiceExpiry[];
   lock: LockStatus;
 }
 
@@ -71,16 +75,61 @@ function isPidAlive(pid: number): boolean {
 export class StateStore {
   private stateDir: string;
   private lockDir: string;
+  private archiveDir: string;
 
   constructor(stateDir: string) {
     this.stateDir = stateDir;
     this.lockDir = join(stateDir, ".locks");
+    this.archiveDir = join(stateDir, ".archived");
     if (!existsSync(this.stateDir)) {
       mkdirSync(this.stateDir, { recursive: true });
     }
     if (!existsSync(this.lockDir)) {
       mkdirSync(this.lockDir, { recursive: true });
     }
+    if (!existsSync(this.archiveDir)) {
+      mkdirSync(this.archiveDir, { recursive: true });
+    }
+  }
+
+  /**
+   * Archive sessions older than `maxAgeDays`. Moves files (does NOT delete)
+   * to `.archived/`. Returns the list of archived session names.
+   *
+   * Archival, not deletion, is the policy: user work should never be
+   * silently destroyed, only moved out of the primary store.
+   */
+  archiveStale(maxAgeDays: number): string[] {
+    if (!existsSync(this.stateDir)) return [];
+    const files = readdirSync(this.stateDir).filter((f) => f.endsWith(".json"));
+    const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
+    const archived: string[] = [];
+
+    for (const file of files) {
+      // Skip special files like manifest.json — user-managed, not a session
+      if (file === "manifest.json") continue;
+
+      const path = join(this.stateDir, file);
+      try {
+        const data: SavedState = JSON.parse(readFileSync(path, "utf-8"));
+        const savedAt = data.savedAt ? new Date(data.savedAt).getTime() : 0;
+        if (savedAt > 0 && savedAt < cutoff) {
+          // Skip if locked by a live process
+          const lockStatus = this.getLockStatus(
+            data.name || file.replace(".json", ""),
+          );
+          if (lockStatus.locked && !lockStatus.stale) continue;
+
+          const dest = join(this.archiveDir, file);
+          renameSync(path, dest);
+          archived.push(data.name || file.replace(".json", ""));
+        }
+      } catch {
+        // Corrupted or unreadable — leave alone
+      }
+    }
+
+    return archived;
   }
 
   private filePath(name: string): string {
@@ -300,8 +349,14 @@ export class StateStore {
         const path = join(this.stateDir, file);
         const data: SavedState = JSON.parse(readFileSync(path, "utf-8"));
         const sessionName = data.name || file.replace(".json", "");
+        // Skip non-session files like manifest.json
+        if (!data.storageState) continue;
         // Live-detect auth if the file predates the auth feature
         const auth = data.auth ?? detectAuth(data.storageState);
+        const expiry = checkExpiry(
+          data.storageState,
+          auth.map((a) => a.service),
+        );
         results.push({
           name: sessionName,
           lastUrl: data.lastUrl,
@@ -309,6 +364,7 @@ export class StateStore {
           savedBy: data.savedBy,
           filePath: path,
           auth,
+          expiry,
           lock: this.getLockStatus(sessionName),
         });
       } catch {

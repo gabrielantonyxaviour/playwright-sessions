@@ -7,6 +7,11 @@ import {
 } from "./shared.js";
 import type { HandlerFn } from "./shared.js";
 import { probeServices } from "../session-probe.js";
+import {
+  getCachedProbe,
+  setCachedProbe,
+  probedMinutesAgo,
+} from "../probe-cache.js";
 
 export const sessionHandlers = new Map<string, HandlerFn>([
   [
@@ -126,26 +131,56 @@ export const sessionHandlers = new Map<string, HandlerFn>([
         return JSON.stringify([]);
       }
 
-      // Optional: run HTTP probes to verify live server-side auth
-      const probe = args.probe as boolean | undefined;
-      const probeResultsBySession = new Map<
+      // probe defaults to true (cache-backed, ~0ms on cache hit, ~1-2s on miss)
+      // probe:false preserves the old cookie-metadata-only behavior
+      const probe = (args.probe as boolean | undefined) ?? true;
+
+      // Map: sessionName → Map<service, { alive, reason, minutesAgo }>
+      const probeDataBySession = new Map<
         string,
-        Map<string, { alive: boolean; reason: string }>
+        {
+          map: Map<string, { alive: boolean; reason: string }>;
+          minutesAgo: number | null;
+        }
       >();
+
       if (probe) {
         await Promise.all(
           saved.map(async (s) => {
             if (!s.auth || s.auth.length === 0) return;
+
+            // Try cache first
+            const cached = getCachedProbe(s.name);
+            if (cached) {
+              const minsAgo = probedMinutesAgo(s.name);
+              probeDataBySession.set(s.name, {
+                map: new Map(
+                  Object.entries(cached.services).map(([svc, r]) => [svc, r]),
+                ),
+                minutesAgo: minsAgo,
+              });
+              return;
+            }
+
+            // Cache miss — run live probes
             try {
               const data = JSON.parse(readFileSync(s.filePath, "utf-8"));
               const services = s.auth.map((a) => a.service);
               const results = await probeServices(data.storageState, services);
-              probeResultsBySession.set(
-                s.name,
-                new Map(results.map((r) => [r.service, r])),
-              );
+              const serviceMap: Record<
+                string,
+                { alive: boolean; reason: string }
+              > = {};
+              for (const r of results) {
+                serviceMap[r.service] = { alive: r.alive, reason: r.reason };
+              }
+              setCachedProbe(s.name, serviceMap);
+              probeDataBySession.set(s.name, {
+                map: new Map(results.map((r) => [r.service, r])),
+                minutesAgo: 0,
+              });
             } catch {
-              /* skip unreadable */
+              /* skip unreadable sessions */
             }
           }),
         );
@@ -153,38 +188,67 @@ export const sessionHandlers = new Map<string, HandlerFn>([
 
       const formatted = saved.map((s) => {
         const expiryMap = new Map((s.expiry ?? []).map((e) => [e.service, e]));
-        const probeMap = probeResultsBySession.get(s.name);
+        const probeData = probeDataBySession.get(s.name);
         const authSummary = s.auth?.length
           ? s.auth.map((a) => {
               const id = a.identity ? ` (${a.identity})` : "";
               const tag = a.manual ? " [manual]" : "";
-              const exp = expiryMap.get(a.service);
-              let expTag = "";
-              if (exp) {
-                if (exp.status === "valid") {
-                  expTag = ` [valid, ${exp.daysUntilExpiry}d left]`;
-                } else if (exp.status === "expiring-soon") {
-                  expTag = ` [expiring in ${exp.daysUntilExpiry}d]`;
-                } else if (exp.status === "expired") {
-                  expTag = ` [EXPIRED]`;
-                } else if (exp.status === "session-only") {
-                  expTag = ` [session cookie]`;
-                }
-              }
-              let probeTag = "";
-              if (probeMap) {
-                const r = probeMap.get(a.service);
-                if (r) {
-                  if (r.reason === "no-probe") {
-                    probeTag = " [no probe]";
-                  } else if (r.alive) {
-                    probeTag = " [LIVE]";
+
+              if (probeData) {
+                // Probe mode: use live/dead result instead of cookie expiry
+                const r = probeData.map.get(a.service);
+                let probeTag: string;
+                if (
+                  !r ||
+                  r.reason === "no-probe" ||
+                  r.reason === "no-cookies"
+                ) {
+                  // No probe available — fall back to cookie expiry info
+                  const exp = expiryMap.get(a.service);
+                  let fallback = "";
+                  if (exp) {
+                    if (exp.status === "valid") {
+                      fallback = ` [no-probe, cookie-valid ${exp.daysUntilExpiry}d]`;
+                    } else if (exp.status === "expiring-soon") {
+                      fallback = ` [no-probe, expiring ${exp.daysUntilExpiry}d]`;
+                    } else if (exp.status === "expired") {
+                      fallback = ` [no-probe, cookie-expired]`;
+                    } else if (exp.status === "session-only") {
+                      fallback = ` [no-probe, session-cookie]`;
+                    } else {
+                      fallback = ` [no-probe]`;
+                    }
                   } else {
-                    probeTag = ` [DEAD ${r.reason}]`;
+                    fallback = ` [no-probe]`;
+                  }
+                  probeTag = fallback;
+                } else if (r.alive) {
+                  const ago =
+                    probeData.minutesAgo !== null && probeData.minutesAgo > 0
+                      ? `${probeData.minutesAgo}m ago`
+                      : "just now";
+                  probeTag = ` [LIVE, probed ${ago}]`;
+                } else {
+                  probeTag = ` [DEAD, ${r.reason}]`;
+                }
+                return `${a.service}${id}${tag}${probeTag}`;
+              } else {
+                // probe:false — legacy cookie-metadata display
+                const exp = expiryMap.get(a.service);
+                let expTag = "";
+                if (exp) {
+                  if (exp.status === "valid") {
+                    expTag = ` [valid, ${exp.daysUntilExpiry}d left]`;
+                  } else if (exp.status === "expiring-soon") {
+                    expTag = ` [expiring in ${exp.daysUntilExpiry}d]`;
+                  } else if (exp.status === "expired") {
+                    expTag = ` [EXPIRED]`;
+                  } else if (exp.status === "session-only") {
+                    expTag = ` [session cookie]`;
                   }
                 }
+                return `${a.service}${id}${tag}${expTag}`;
               }
-              return `${a.service}${id}${tag}${expTag}${probeTag}`;
             })
           : [];
         const lockLabel = s.lock.locked

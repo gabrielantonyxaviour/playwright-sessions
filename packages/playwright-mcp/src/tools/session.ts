@@ -123,14 +123,14 @@ export function sessionToolDefs() {
     {
       name: "session_list_saved",
       description:
-        "List all saved session states on disk. Shows name, last URL, authenticated services, identity, cookie expiry status (valid/expiring-soon/expired/session-only — derived from cookie metadata with NO network calls), and lock status. Optionally runs HTTP probes to verify live server-side auth (only supported for a small set of services; most show 'no probe').",
+        "List all saved session states on disk. Runs live HTTP probes by default (results cached 1h per session). Shows per-service live/dead status: [LIVE, probed Nm ago], [DEAD, 302], or [no-probe, cookie-valid Nd] for services without a probe endpoint. Pass probe:false to skip network calls and fall back to cookie-metadata-only display.",
       inputSchema: {
         type: "object",
         properties: {
           probe: {
             type: "boolean",
             description:
-              "If true, make lightweight HTTP requests to verify each service's auth is actually alive server-side. Slow (adds ~1-2s per session). Only reliable for services whose web auth uses session cookies — most modern apps use JWTs in localStorage and will show [no probe]. Defaults to false (cookie-metadata-only check).",
+              "Run live HTTP probes to verify server-side auth. Default true (probe results are cached for 1 hour — fast on cache hit). Pass false to use cookie-metadata-only display (no network calls, same as pre-v0.3.0 behavior).",
           },
         },
       },

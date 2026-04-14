@@ -77,10 +77,55 @@ interface ProbeEndpoint {
 //
 // To add a new endpoint: verify by running `node dist/index.js sessions
 // --name=<session> --probe` with a known-good session and confirm [LIVE].
+// VERIFIED probe endpoints — each was tested against real saved sessions.
+// "Verified" means: live session → 200, dead/expired session → non-200.
+//
+// DROPPED probes and reasons (investigated 2026-04-14):
+//   Google       — consistent 429 (bot-detection on myaccount.google.com).
+//                  Can't distinguish live from dead.
+//   YouTube      — /account returns 303 for ALL sessions incl. logged-in.
+//                  /feed/subscriptions returns 200 even when not logged in.
+//   Neon         — /api/v2/users/me returns 401 (needs Bearer token, not cookie).
+//                  Console app endpoints only return 301/302 redirect.
+//   Notion       — /api/v3/getSpaces is POST-only; returns 404 on GET.
+//   Higgsfield AI— /api/me returns 404 (endpoint does not exist).
+//   X/Twitter    — /1.1/account/settings.json returns 403 even with ct0 CSRF
+//                  header. API requires Bearer app token beyond session cookies.
+//   Microsoft    — account.microsoft.com redirects for all sessions.
+//                  Session cookies are scoped to microsoftonline.com, not
+//                  account.microsoft.com.
+//   WhatsApp     — SPA; no HTTP-probeable auth endpoint exists.
+//   Tldv         — tldv.io not in SERVICE_DOMAINS, so it never appears in
+//                  session auth lists. Cannot verify without detection support.
 const PROBE_ENDPOINTS: Record<string, ProbeEndpoint> = {
   Vercel: {
-    // Verified: api.vercel.com/v2/user returns 200 with browser session cookies
+    // VERIFIED: api.vercel.com/v2/user returns 200 with browser session cookies.
+    // Expired/missing session → 401.
     url: "https://api.vercel.com/v2/user",
+    aliveStatusCodes: [200],
+  },
+  GitHub: {
+    // VERIFIED: /settings/profile returns 200 with valid user_session cookie.
+    // Expired user_session → 302 redirect to /login.
+    url: "https://github.com/settings/profile",
+    aliveStatusCodes: [200],
+  },
+  Supabase: {
+    // VERIFIED: /dashboard/account/me returns 200 with valid session.
+    // Invalid/missing session → redirect.
+    url: "https://supabase.com/dashboard/account/me",
+    aliveStatusCodes: [200],
+  },
+  LinkedIn: {
+    // VERIFIED: /feed/ returns 200 when li_at cookie is valid.
+    // Expired li_at → 302 redirect to /login.
+    url: "https://www.linkedin.com/feed/",
+    aliveStatusCodes: [200],
+  },
+  Instagram: {
+    // VERIFIED: /accounts/edit/ returns 200 with valid sessionid cookie.
+    // Not logged in → 302 redirect to /accounts/login/.
+    url: "https://www.instagram.com/accounts/edit/",
     aliveStatusCodes: [200],
   },
 };
@@ -129,7 +174,7 @@ function buildCookieHeader(
  * Probe a single service. Returns a ProbeResult regardless of outcome.
  * Never throws.
  */
-async function probeOne(
+export async function probeOne(
   service: string,
   storageState: StorageStateShape,
   timeoutMs: number,

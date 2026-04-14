@@ -1,6 +1,6 @@
 {
   "name": "playwright-sessions",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Playwright MCP with persistent named sessions — save/restore browser auth, clone sessions, manage multiple isolated contexts. Fork of microsoft/playwright-mcp.",
   "type": "module",
   "repository": {

@@ -1,6 +1,6 @@
 # playwright-sessions
 
-> **Fork of [microsoft/playwright-mcp](https://github.com/microsoft/playwright-mcp)** — adds persistent named session management, cookie expiry detection, and clone safety on top of the official Playwright MCP.
+> **Fork of [microsoft/playwright-mcp](https://github.com/microsoft/playwright-mcp)** — adds persistent named session management, live HTTP probes, cookie expiry detection, and clone safety on top of the official Playwright MCP.
 
 [![npm version](https://img.shields.io/npm/v/playwright-sessions.svg)](https://www.npmjs.com/package/playwright-sessions)
 [![license](https://img.shields.io/npm/l/playwright-sessions.svg)](https://github.com/gabrielantonyxaviour/playwright-sessions/blob/main/LICENSE)
@@ -9,7 +9,9 @@
 
 The official `@playwright/mcp` starts fresh every time — no way to save a logged-in browser and reuse it later. This fork adds a **session layer**: named, persistent browser contexts that survive across Claude Code restarts.
 
-**v0.2.0** also fixes the biggest footgun in browser session management: sessions that pollute your disk. Clones are now throwaway by design (the code enforces it), close never auto-saves, and cookie expiry is detected without opening a browser.
+**v0.3.0** makes session status authoritative: `session_list_saved` now runs real HTTP probes by default (cached 1 hour) to verify live server-side auth — not just cookie expiry metadata. LIVE/DEAD verdicts you can trust.
+
+**v0.2.0** fixed the biggest footgun in browser session management: sessions that pollute your disk. Clones are throwaway by design (the code enforces it), close never auto-saves, and cookie expiry is detected without opening a browser.
 
 ## Install
 
@@ -44,7 +46,7 @@ Add to your MCP config (`.claude.json`, `.mcp.json`, or equivalent):
 | `session_list` | List all active sessions with URL, title, idle time |
 | `session_clone` | Clone a session's cookies into a new throwaway context |
 | `session_save` | Persist cookies + localStorage to `~/.playwright-sessions/` |
-| `session_list_saved` | List saved sessions with services, identities, and **cookie expiry status** |
+| `session_list_saved` | List saved sessions with services, identities, and **live HTTP probe status** (cached 1h) |
 | `session_switch` | Change the default session |
 | `session_close` | Destroy a session (no auto-save) |
 | `session_storage_state` | Export raw storage state as JSON |
@@ -57,18 +59,36 @@ All existing Playwright MCP browser tools (`browser_navigate`, `browser_click`, 
 
 ## Key features
 
+### Live HTTP probes (v0.3.0)
+
+`session_list_saved` now runs real HTTP probes by default (results cached 1 hour):
+
+```
+GitHub (BonneyMantra)       [LIVE, probed just now]
+Vercel (gabriel@example.com) [LIVE, probed 3m ago]
+Supabase                    [LIVE, probed 3m ago]
+LinkedIn                    [DEAD, 302]
+Google                      [no-probe, cookie-valid 380d]
+Microsoft                   [no-probe, session-cookie]
+```
+
+**Verified probe endpoints** (tested against real saved sessions):
+
+| Service | Endpoint | LIVE signal | DEAD signal |
+|---------|----------|------------|-------------|
+| Vercel | `api.vercel.com/v2/user` | 200 | 401 |
+| GitHub | `github.com/settings/profile` | 200 | 302 → /login |
+| Supabase | `supabase.com/dashboard/account/me` | 200 | redirect |
+| LinkedIn | `linkedin.com/feed/` | 200 | 302 → /login |
+| Instagram | `instagram.com/accounts/edit/` | 200 | 302 → /accounts/login/ |
+
+Services without a verified probe endpoint show `[no-probe, cookie-valid Nd]` (falls back to cookie metadata — same as v0.2.0 behavior).
+
+Pass `{ probe: false }` to skip network calls and use cookie-metadata-only display.
+
 ### Cookie expiry detection (v0.2.0)
 
-`session_list_saved` shows per-service expiry status — no browser or network needed:
-
-```
-GitHub (BonneyMantra) [EXPIRED]
-Google [valid, 380d left]
-Vercel (gabriel@example.com) [valid, 348d left]
-Microsoft [session cookie]
-```
-
-Pass `{ probe: true }` for live HTTP validation against server endpoints.
+For services without live probe endpoints, `session_list_saved` falls back to cookie expiry status derived from metadata — no browser or network needed.
 
 ### Clone safety (v0.2.0)
 
@@ -90,11 +110,11 @@ Auto-detects authenticated services from cookies: GitHub, Google, Vercel, Neon, 
 ## CLI
 
 ```bash
-# List all saved sessions with auth services and expiry
+# List all saved sessions — runs live probes by default (cached 1h)
 npx playwright-sessions sessions
 
-# Include live HTTP probes
-npx playwright-sessions sessions --probe
+# Skip probes, use cookie-metadata only
+npx playwright-sessions sessions --probe=false
 
 # Filter to a specific session
 npx playwright-sessions sessions --name=gabriel-platforms
@@ -116,7 +136,7 @@ session_close({ sessionId: "test-ui" })
 ### Auth-required testing
 
 ```
-session_list_saved()  // Check which sessions have the auth you need + expiry
+session_list_saved()  // Shows LIVE/DEAD status per service (probed, cached 1h)
 session_create({ name: "test-auth", restoreFrom: "my-saved-session" })
 // Cookies are loaded — you're logged in
 browser_navigate({ url: "https://dashboard.example.com" })

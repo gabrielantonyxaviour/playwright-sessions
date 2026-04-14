@@ -348,7 +348,10 @@ export class StateStore {
       try {
         const path = join(this.stateDir, file);
         const data: SavedState = JSON.parse(readFileSync(path, "utf-8"));
-        const sessionName = data.name || file.replace(".json", "");
+        // Use filename as session name (not data.name) so that symlink aliases
+        // (e.g. aryaa.json → gabriel-socials-comms.json) appear under their
+        // own names rather than as duplicates of the canonical session.
+        const sessionName = file.replace(".json", "");
         // Skip non-session files like manifest.json
         if (!data.storageState) continue;
         // Live-detect auth if the file predates the auth feature
